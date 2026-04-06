@@ -1,0 +1,27 @@
+# Example: Add this workflow to your repo at .github/workflows/supply-chain-audit.yml
+
+name: Supply Chain Audit
+
+on:
+  pull_request:
+    paths:
+      - "package-lock.json"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  audit:
+    name: Audit dependency changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: originsec/npm-lock-supply-chain-claude@main
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Optional: override the Claude model (default: claude-sonnet-4-20250514)
+          # model: claude-sonnet-4-20250514
