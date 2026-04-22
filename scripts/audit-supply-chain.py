@@ -37,6 +37,8 @@ ANTHROPIC_API_VERSION = "2023-06-01"
 USER_AGENT = "npm-lock-supply-chain-audit/1.0 (github.com/originsec/npm-lock-supply-chain-claude)"
 DOWNLOAD_DELAY = 0.25  # courtesy delay between npm registry downloads (seconds)
 MAX_COMMENT_CHARS = 60_000  # GitHub comment limit is 65536; leave headroom
+# Cap the diff payload sent to Claude to fit within Sonnet's 200k-token input.
+MAX_DIFF_CHARS = 150_000
 SUPPRESS_MARKER = "[supply-chain-audit-ok]"
 
 SYSTEM_PROMPT = """\
@@ -483,6 +485,19 @@ def diff_packages(old_dir: Path | None, new_dir: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _truncate_diff(diff_text: str) -> tuple[str, bool]:
+    """Cap diff_text at MAX_DIFF_CHARS; return (maybe-truncated-text, was_truncated)."""
+    if len(diff_text) <= MAX_DIFF_CHARS:
+        return diff_text, False
+    omitted = len(diff_text) - MAX_DIFF_CHARS
+    truncated = diff_text[:MAX_DIFF_CHARS] + (
+        f"\n\n... (diff truncated: {omitted} characters omitted to fit within "
+        f"Claude's context window; audit only reflects the leading "
+        f"{MAX_DIFF_CHARS} characters)\n"
+    )
+    return truncated, True
+
+
 def call_claude(
     name: str,
     old_version: str | None,
@@ -493,13 +508,21 @@ def call_claude(
     model: str,
 ) -> dict:
     """Call Claude to audit a package diff. Returns the parsed verdict dict."""
+    diff_text, was_truncated = _truncate_diff(diff_text)
+    truncation_note = (
+        "\n\nNote: the diff exceeded the size limit and was truncated. "
+        "Reflect this uncertainty in your verdict -- do not claim confidence "
+        "about un-inspected regions.\n"
+        if was_truncated
+        else ""
+    )
     if change_type == "added":
         user_msg = (
             f'Analyze the following contents for the newly added npm package dependency "{name}" '
             f"version {new_version}.\n\n"
             f"This is a new dependency being added to the project. All file contents are shown "
             f"as additions. Pay special attention to whether this package's purpose matches its "
-            f"stated description and whether it contains any suspicious functionality.\n\n"
+            f"stated description and whether it contains any suspicious functionality.{truncation_note}\n\n"
             f"<diff>\n{diff_text}\n</diff>"
         )
     else:
@@ -507,7 +530,7 @@ def call_claude(
             f'Analyze the following diff for the npm package "{name}" '
             f"({change_type} from {old_version} to {new_version}).\n\n"
             f"The diff shows all file changes between the old and new versions of this package "
-            f"as published on the npm registry.\n\n"
+            f"as published on the npm registry.{truncation_note}\n\n"
             f"<diff>\n{diff_text}\n</diff>"
         )
 
@@ -552,6 +575,12 @@ def call_claude(
             return parsed
         except json.JSONDecodeError as e:
             last_err = f"Invalid JSON from Claude: {e}\nRaw response: {text[:500]}"
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                body = "<unreadable>"
+            last_err = f"API request failed: {e} -- {body[:500]}"
         except (urllib.error.URLError, OSError) as e:
             last_err = f"API request failed: {e}"
 
