@@ -890,7 +890,8 @@ def main() -> int:
                 )
                 continue
 
-            new_extract_dir = tmp / f"new-{change.name}-{change.new_version}"
+            # Index prefix: same new_version can appear twice with different old_versions.
+            new_extract_dir = tmp / f"new-{i}-{change.name}-{change.new_version}"
             new_extract_dir.mkdir(parents=True)
             new_dir = extract_tarball(new_archive, new_extract_dir)
             if not new_dir:
@@ -915,7 +916,7 @@ def main() -> int:
                     change.name, change.old_version, change.old_resolved_url, tmp
                 )
                 if old_archive:
-                    old_extract_dir = tmp / f"old-{change.name}-{change.old_version}"
+                    old_extract_dir = tmp / f"old-{i}-{change.name}-{change.old_version}"
                     old_extract_dir.mkdir(parents=True)
                     old_dir = extract_tarball(old_archive, old_extract_dir)
 
