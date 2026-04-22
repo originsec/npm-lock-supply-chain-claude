@@ -30,6 +30,50 @@ extract_tarball = audit.extract_tarball
 _extract_package_name = audit._extract_package_name
 _is_non_registry_url = audit._is_non_registry_url
 LOCKFILE_RE = audit.LOCKFILE_RE
+cache_key = audit.cache_key
+load_verdict_cache = audit.load_verdict_cache
+save_verdict_cache = audit.save_verdict_cache
+CACHE_VERSION = audit.CACHE_VERSION
+
+
+# ---------------------------------------------------------------------------
+# Verdict cache
+# ---------------------------------------------------------------------------
+
+
+class TestCacheKey:
+    def test_includes_all_identifiers(self):
+        assert (
+            cache_key("lodash", "https://reg/a.tgz", "https://reg/b.tgz")
+            == "lodash|https://reg/a.tgz|https://reg/b.tgz"
+        )
+
+    def test_none_old_id_encodes_as_empty(self):
+        assert cache_key("lodash", None, "https://reg/b.tgz") == "lodash||https://reg/b.tgz"
+
+
+class TestVerdictCache:
+    def test_returns_empty_when_path_none(self):
+        assert load_verdict_cache(None) == {}
+
+    def test_malformed_json_returns_empty(self, tmp_path):
+        p = tmp_path / "cache.json"
+        p.write_text("{not json")
+        assert load_verdict_cache(str(p)) == {}
+
+    def test_wrong_version_returns_empty(self, tmp_path):
+        p = tmp_path / "cache.json"
+        p.write_text(json.dumps({"version": 999, "entries": {"k": {"risk": "none"}}}))
+        assert load_verdict_cache(str(p)) == {}
+
+    def test_roundtrip(self, tmp_path):
+        p = str(tmp_path / "cache.json")
+        entries = {"lodash|a|b": {"risk": "none", "summary": "OK", "findings": []}}
+        save_verdict_cache(p, entries)
+        assert load_verdict_cache(p) == entries
+
+    def test_save_no_path_is_noop(self):
+        save_verdict_cache(None, {"x": {"risk": "none"}})
 
 
 # ---------------------------------------------------------------------------

@@ -691,6 +691,47 @@ def format_comment(verdicts: list[Verdict]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Verdict cache
+# ---------------------------------------------------------------------------
+#
+# package-lock.json records a `resolved` URL for every registry package. The
+# URL points to a specific tarball on the npm registry and is immutable for
+# a given (name, version). Keying the cache by (name, old_url, new_url)
+# yields entries that are safe to share across repos and PRs.
+
+CACHE_VERSION = 1
+
+
+def cache_key(name: str, old_id: str | None, new_id: str | None) -> str:
+    return f"{name}|{old_id or ''}|{new_id or ''}"
+
+
+def load_verdict_cache(path: str | None) -> dict[str, dict]:
+    if not path:
+        return {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict) or data.get("version") != CACHE_VERSION:
+        return {}
+    entries = data.get("entries", {})
+    return entries if isinstance(entries, dict) else {}
+
+
+def save_verdict_cache(path: str | None, cache: dict[str, dict]) -> None:
+    if not path:
+        return
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump({"version": CACHE_VERSION, "entries": cache}, f)
+    except OSError as e:
+        print(f"::warning::Failed to save verdict cache: {e}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -775,6 +816,10 @@ def main() -> int:
         file=sys.stderr,
     )
 
+    cache_path = os.environ.get("AUDIT_CACHE_FILE")
+    cache = load_verdict_cache(cache_path)
+    cache_hits = 0
+
     verdicts: list[Verdict] = []
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -786,6 +831,24 @@ def main() -> int:
                 f"({change.old_version} -> {change.new_version})...",
                 file=sys.stderr,
             )
+
+            # Cache lookup before any network I/O or Claude call.
+            old_id = change.old_resolved_url or change.old_version
+            new_id = change.new_resolved_url or change.new_version
+            key = cache_key(change.name, old_id, new_id)
+            if key in cache:
+                entry = cache[key]
+                verdicts.append(
+                    Verdict(
+                        change=change,
+                        risk=entry.get("risk", "medium"),
+                        summary=entry.get("summary", ""),
+                        findings=entry.get("findings", []),
+                    )
+                )
+                cache_hits += 1
+                print(f"  cache hit ({key})", file=sys.stderr)
+                continue
 
             # Download and extract new version
             new_archive = download_tarball(
@@ -839,14 +902,13 @@ def main() -> int:
             # Diff
             diff_text = diff_packages(old_dir, new_dir)
             if not diff_text.strip():
-                verdicts.append(
-                    Verdict(
-                        change=change,
-                        risk="none",
-                        summary="No source changes detected between versions.",
-                        findings=[],
-                    )
-                )
+                entry = {
+                    "risk": "none",
+                    "summary": "No source changes detected between versions.",
+                    "findings": [],
+                }
+                cache[key] = entry
+                verdicts.append(Verdict(change=change, **entry))
                 continue
 
             # Call Claude
@@ -860,14 +922,23 @@ def main() -> int:
                 model=model,
             )
 
-            verdicts.append(
-                Verdict(
-                    change=change,
-                    risk=verdict_data.get("risk", "medium"),
-                    summary=verdict_data.get("summary", "No summary provided."),
-                    findings=verdict_data.get("findings", []),
-                )
-            )
+            entry = {
+                "risk": verdict_data.get("risk", "medium"),
+                "summary": verdict_data.get("summary", "No summary provided."),
+                "findings": verdict_data.get("findings", []),
+            }
+            # Only cache real Claude verdicts; transient errors should retry.
+            if "Audit failed" not in entry["summary"]:
+                cache[key] = entry
+            verdicts.append(Verdict(change=change, **entry))
+
+    save_verdict_cache(cache_path, cache)
+    if cache_path:
+        print(
+            f"Verdict cache: {cache_hits}/{len(changes)} hits; "
+            f"{len(cache)} total entries stored.",
+            file=sys.stderr,
+        )
 
     # Format and output the comment
     comment = format_comment(verdicts)
