@@ -2,7 +2,7 @@
 
 A GitHub Action that audits package-lock.json dependency changes for supply chain attacks using Claude.
 
-When a PR modifies `package-lock.json`, this action:
+When a PR modifies any `package-lock.json` (root or nested, e.g. `frontend/package-lock.json`), this action:
 
 1. Diffs the lockfile to find every added, upgraded, or downgraded registry dependency
 2. Downloads the old and new tarballs from the npm registry (URLs are embedded in package-lock.json)
@@ -38,7 +38,7 @@ name: Supply Chain Audit
 on:
   pull_request:
     paths:
-      - "package-lock.json"
+      - "**/package-lock.json"
 
 permissions:
   contents: read

@@ -38,7 +38,6 @@ USER_AGENT = "npm-lock-supply-chain-audit/1.0 (github.com/originsec/npm-lock-sup
 DOWNLOAD_DELAY = 0.25  # courtesy delay between npm registry downloads (seconds)
 MAX_COMMENT_CHARS = 60_000  # GitHub comment limit is 65536; leave headroom
 SUPPRESS_MARKER = "[supply-chain-audit-ok]"
-LOCKFILE_NAME = "package-lock.json"
 
 SYSTEM_PROMPT = """\
 You are a supply chain security auditor for JavaScript/Node.js packages published on npm. \
@@ -215,6 +214,25 @@ def parse_version(v: str) -> tuple[int, ...]:
 # ---------------------------------------------------------------------------
 # Change detection
 # ---------------------------------------------------------------------------
+
+LOCKFILE_RE = re.compile(r"(?:^|/)package-lock\.json$")
+
+
+def discover_changed_lockfiles(base_ref: str) -> list[str]:
+    """Return every package-lock.json path (root or nested) changed since base_ref."""
+    try:
+        output = subprocess.check_output(
+            ["git", "diff", "--name-only", f"{base_ref}...HEAD"],
+            text=True,
+            stderr=subprocess.PIPE,
+        )
+    except subprocess.CalledProcessError as e:
+        print(
+            f"::warning::git diff against {base_ref} failed: {e.stderr.strip()}",
+            file=sys.stderr,
+        )
+        return []
+    return [line for line in output.splitlines() if LOCKFILE_RE.search(line)]
 
 
 @dataclass
@@ -528,7 +546,10 @@ def call_claude(
                 text = re.sub(r"^```\w*\n?", "", text)
                 text = re.sub(r"\n?```$", "", text)
                 text = text.strip()
-            return json.loads(text)
+            # Use raw_decode so trailing commentary after the JSON object
+            # doesn't cause json.loads to raise "Extra data".
+            parsed, _ = json.JSONDecoder().raw_decode(text)
+            return parsed
         except json.JSONDecodeError as e:
             last_err = f"Invalid JSON from Claude: {e}\nRaw response: {text[:500]}"
         except (urllib.error.URLError, OSError) as e:
@@ -671,35 +692,57 @@ def main() -> int:
         except (OSError, json.JSONDecodeError):
             pass
 
-    # Read base and head package-lock.json
-    try:
-        base_text = subprocess.check_output(
-            ["git", "show", f"{base_ref}:{LOCKFILE_NAME}"],
-            text=True,
-            stderr=subprocess.PIPE,
-        )
-    except subprocess.CalledProcessError:
-        print(f"::warning::Could not read {LOCKFILE_NAME} from {base_ref}, treating all deps as new.",
-              file=sys.stderr)
-        base_text = ""
+    lockfiles = discover_changed_lockfiles(base_ref)
+    if not lockfiles:
+        print("No package-lock.json changes detected.", file=sys.stderr)
+        return 0
 
-    try:
-        with open(LOCKFILE_NAME) as f:
-            head_text = f.read()
-    except OSError as e:
-        print(f"::error::Could not read {LOCKFILE_NAME}: {e}", file=sys.stderr)
-        return 1
+    print(
+        f"Auditing {len(lockfiles)} changed package-lock.json file(s): {', '.join(lockfiles)}",
+        file=sys.stderr,
+    )
 
-    base_pkgs = parse_lockfile(base_text)
-    head_pkgs = parse_lockfile(head_text)
-    changes = compute_changes(base_pkgs, head_pkgs)
+    # Merge changes across all lockfiles, deduping by (name, old_version, new_version).
+    # A monorepo may have the same package upgrade in multiple lockfiles — the tarball
+    # diff is identical, so auditing once is sufficient.
+    merged: dict[tuple[str, str | None, str | None], Change] = {}
+    for lockfile in lockfiles:
+        try:
+            base_text = subprocess.check_output(
+                ["git", "show", f"{base_ref}:{lockfile}"],
+                text=True,
+                stderr=subprocess.PIPE,
+            )
+        except subprocess.CalledProcessError:
+            print(
+                f"::warning::Could not read {lockfile} from {base_ref}, "
+                f"treating all deps as new.",
+                file=sys.stderr,
+            )
+            base_text = ""
+
+        try:
+            with open(lockfile) as f:
+                head_text = f.read()
+        except OSError as e:
+            print(f"::warning::Could not read {lockfile}: {e}", file=sys.stderr)
+            continue
+
+        base_pkgs = parse_lockfile(base_text)
+        head_pkgs = parse_lockfile(head_text)
+        for change in compute_changes(base_pkgs, head_pkgs):
+            merged.setdefault(
+                (change.name, change.old_version, change.new_version), change
+            )
+
+    changes = sorted(merged.values(), key=lambda c: c.name)
 
     if not changes:
         print("No registry dependency changes detected.", file=sys.stderr)
         return 0
 
     print(
-        f"Found {len(changes)} dependency change(s) to audit.",
+        f"Found {len(changes)} unique dependency change(s) to audit.",
         file=sys.stderr,
     )
 

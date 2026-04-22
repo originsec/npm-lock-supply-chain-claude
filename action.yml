@@ -36,7 +36,8 @@ runs:
       id: changed
       shell: bash
       run: |
-        if git diff --name-only ${{ steps.base.outputs.ref }}...HEAD | grep -q '^package-lock.json$'; then
+        # Matches package-lock.json at any depth (root or nested, e.g. frontend/package-lock.json)
+        if git diff --name-only ${{ steps.base.outputs.ref }}...HEAD | grep -Eq '(^|/)package-lock\.json$'; then
           echo "lockfile_changed=true" >> "$GITHUB_OUTPUT"
         else
           echo "No package-lock.json changes detected, skipping audit."
