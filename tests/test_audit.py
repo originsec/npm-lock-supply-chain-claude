@@ -29,6 +29,71 @@ format_comment = audit.format_comment
 extract_tarball = audit.extract_tarball
 _extract_package_name = audit._extract_package_name
 _is_non_registry_url = audit._is_non_registry_url
+LOCKFILE_RE = audit.LOCKFILE_RE
+
+
+# ---------------------------------------------------------------------------
+# LOCKFILE_RE (nested package-lock.json discovery)
+# ---------------------------------------------------------------------------
+
+
+class TestLockfileRegex:
+    def test_matches_root(self):
+        assert LOCKFILE_RE.search("package-lock.json")
+
+    def test_matches_nested(self):
+        assert LOCKFILE_RE.search("frontend/package-lock.json")
+
+    def test_matches_deeply_nested(self):
+        assert LOCKFILE_RE.search("apps/web/client/package-lock.json")
+
+    def test_rejects_package_json(self):
+        assert not LOCKFILE_RE.search("package.json")
+        assert not LOCKFILE_RE.search("frontend/package.json")
+
+    def test_rejects_yarn_lock(self):
+        assert not LOCKFILE_RE.search("yarn.lock")
+        assert not LOCKFILE_RE.search("frontend/pnpm-lock.yaml")
+
+    def test_rejects_similar_suffix(self):
+        assert not LOCKFILE_RE.search("package-lock.json.bak")
+        assert not LOCKFILE_RE.search("my-package-lock.json.txt")
+
+
+# ---------------------------------------------------------------------------
+# Claude response parsing — tolerates trailing commentary after JSON
+# ---------------------------------------------------------------------------
+
+
+class TestClaudeResponseParsing:
+    def _parse(self, raw: str) -> dict:
+        text = raw.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```\w*\n?", "", text)
+            text = re.sub(r"\n?```$", "", text)
+            text = text.strip()
+        parsed, _ = json.JSONDecoder().raw_decode(text)
+        return parsed
+
+    def test_plain_json(self):
+        raw = '{"risk": "none", "summary": "OK", "findings": []}'
+        assert self._parse(raw)["risk"] == "none"
+
+    def test_json_with_trailing_commentary(self):
+        raw = (
+            '{"risk": "none", "summary": "Routine.", "findings": []}\n\n'
+            "The diff shows a standard version increment with no concerns."
+        )
+        result = self._parse(raw)
+        assert result["risk"] == "none"
+        assert result["summary"] == "Routine."
+
+    def test_fenced_json_with_trailing_commentary(self):
+        raw = (
+            '```json\n{"risk": "low", "summary": "Minor.", "findings": []}\n```\n'
+            "Additional notes from the model."
+        )
+        assert self._parse(raw)["risk"] == "low"
 
 
 # ---------------------------------------------------------------------------

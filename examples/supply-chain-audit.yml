@@ -5,7 +5,7 @@ name: Supply Chain Audit
 on:
   pull_request:
     paths:
-      - "package-lock.json"
+      - "**/package-lock.json"
 
 permissions:
   contents: read
